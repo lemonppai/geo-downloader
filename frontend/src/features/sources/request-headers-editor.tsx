@@ -34,7 +34,11 @@ export function RequestHeadersEditor({ value, onChange, onError, disabled = fals
   return <div className="space-y-2 rounded-md border p-3">
     <div className="flex flex-wrap items-center justify-between gap-2">
       <Label>自定义请求头（可选）</Label>
-      <div className="flex gap-1">
+      <Button type="button" size="sm" variant="outline" disabled={disabled || rows.length >= 64}
+          onClick={() => update([...rows, { id: crypto.randomUUID(), name: '', value: '' }])}>
+          <Plus className="mr-1 size-4" />添加请求头
+        </Button>
+      {/* <div className="flex gap-1">
         <Button type="button" size="sm" variant="ghost" aria-label={visible ? '隐藏请求头值' : '显示请求头值'}
           onClick={() => setVisible(!visible)}>
           {visible ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
@@ -43,7 +47,7 @@ export function RequestHeadersEditor({ value, onChange, onError, disabled = fals
           onClick={() => update([...rows, { id: crypto.randomUUID(), name: '', value: '' }])}>
           <Plus className="mr-1 size-4" />添加请求头
         </Button>
-      </div>
+      </div> */}
     </div>
     {rows.map((row, index) => <div key={row.id} className="flex items-start gap-1.5">
       <div className="grid min-w-0 flex-1 gap-1.5 sm:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">

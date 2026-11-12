@@ -304,6 +304,23 @@ impl Tiles3dFetcher {
             uri_to_local.insert(uri.clone(), local);
         }
 
+        // 5b. 提前写入 root tileset.json（URI 重写为本地路径 + 注入推断的地理定位变换）
+        //     其内容在下载开始前即完全确定，先落盘可保证任务暂停/中断/部分失败时
+        //     输出目录始终有入口文件（断点续传恢复后无需重写）
+        let mut rewritten_tileset = rewrite_tileset_uris(&filter_result.tileset, &uri_to_local);
+        strip_query_params_from_tileset(&mut rewritten_tileset);
+        if rewritten_tileset.root.transform.is_none() {
+            if let Some(transform) = &inferred {
+                rewritten_tileset.root.transform = Some(transform.to_vec());
+            }
+        }
+        let output_tileset_path = output_dir.join("tileset.json");
+        let tileset_json = serde_json::to_string_pretty(&rewritten_tileset)
+            .map_err(|e| format!("序列化 tileset.json 失败: {}", e))?;
+        tokio::fs::write(&output_tileset_path, tileset_json.as_bytes())
+            .await
+            .map_err(|e| format!("写入 tileset.json 失败: {}", e))?;
+
         // 6. 管线化：解析和下载并行
         //    - 解析任务发现 b3dm/glb → 立即推入下载通道
         //    - 解析任务发现 JSON → 获取、解析、写盘，继续递归
@@ -449,24 +466,7 @@ impl Tiles3dFetcher {
             return Err("下载已取消".to_string());
         }
 
-        // 8. 重写 root tileset.json 中的 URI 为本地路径
-        let mut rewritten_tileset = rewrite_tileset_uris(&filter_result.tileset, &uri_to_local);
-        strip_query_params_from_tileset(&mut rewritten_tileset);
-
-        // 无 transform 的 tileset 注入推断的地理定位变换，保证离线预览位置正确
-        if rewritten_tileset.root.transform.is_none() {
-            if let Some(transform) = &inferred {
-                rewritten_tileset.root.transform = Some(transform.to_vec());
-            }
-        }
-
-        // 9. 写入 tileset.json
-        let output_tileset_path = output_dir.join("tileset.json");
-        let json = serde_json::to_string_pretty(&rewritten_tileset)
-            .map_err(|e| format!("序列化 tileset.json 失败: {}", e))?;
-        tokio::fs::write(&output_tileset_path, json)
-            .await
-            .map_err(|e| format!("写入 tileset.json 失败: {}", e))?;
+        // root tileset.json 已在步骤 5b（下载开始前）写盘
 
         let final_completed = completed.load(Ordering::Relaxed);
         let final_failed = failed.load(Ordering::Relaxed);

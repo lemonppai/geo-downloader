@@ -522,6 +522,19 @@ export function CesiumCanvas() {
     }
   }, [])
 
+  // 全球范围 tileset（如 OSM Buildings）的包围球覆盖整个地球，
+  // zoomTo 会把相机拉到全球尺度导致模型不可见；有选区时应飞向选区
+  function flyToSelectionOrTileset(tileset: Cesium) {
+    const viewer = viewerRef.current
+    if (!viewer) return
+    const sel = useSelectionStore.getState()
+    if (sel.bounds != null || (sel.polygon != null && sel.polygon.length > 0)) {
+      drawSelection(sel.bounds, sel.polygon, true)
+    } else {
+      viewer.zoomTo(tileset)
+    }
+  }
+
   const loadTilesetFromUrl = useCallback(
     async (tilesetUrl: string, opts?: { silent?: boolean }) => {
       if (!cesiumRef.current || !viewerRef.current) {
@@ -545,7 +558,7 @@ export function CesiumCanvas() {
           })
         }
         applyInferredGeoreference(Cesium, tileset)
-        viewer.zoomTo(tileset)
+        flyToSelectionOrTileset(tileset)
         setHasTileset(true)
         if (!opts?.silent) toast.success(t('cesium.tilesetLoaded'))
       } catch (e) {
@@ -579,7 +592,7 @@ export function CesiumCanvas() {
             color: `color("white", ${opacity / 100})`,
           })
         }
-        viewer.zoomTo(tileset)
+        flyToSelectionOrTileset(tileset)
         setHasTileset(true)
         if (!opts?.silent) toast.success(t('cesium.ionLoaded'))
       } catch (e) {
