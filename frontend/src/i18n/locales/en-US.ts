@@ -795,6 +795,7 @@ const enUS = {
     sourceTitle: '3D Tiles source',
     sourceDescription: 'Use a URL or Cesium Ion and estimate tiles within the selection',
     referer: 'Referer (optional, for OSS/CDN hotlink protection)',
+    previewProxyFailed: 'Preview proxy failed to start, falling back to direct load',
     assetIdPlaceholder: 'For example, 96188',
     taskName: 'Task name',
     taskNamePlaceholder: 'Leave blank to generate one, such as 3dtiles_20260506',

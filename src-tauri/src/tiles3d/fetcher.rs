@@ -1,7 +1,7 @@
 use crate::task::PauseControl;
 use crate::tiles3d::filter::{
-    filter_tileset, filter_tileset_all, filter_tileset_with_parent_transform, SelectionRegion,
-    TileTransform, IDENTITY_TRANSFORM,
+    filter_tileset_all, filter_tileset_with_parent_transform, inferred_root_transform,
+    SelectionRegion, TileTransform, IDENTITY_TRANSFORM,
 };
 use crate::tiles3d::tileset::{
     IonEndpointResponse, ResolvedEndpoint, Tiles3dSource, Tileset, TilesetSummary,
@@ -253,9 +253,13 @@ impl Tiles3dFetcher {
         let tileset = self.fetch_tileset(tileset_url).await?;
 
         // 2. 空间过滤
+        // 部分 tileset 无 root transform（地理参考在 properties 中），
+        // 需先推断变换再过滤，否则局部坐标会被换算到错误经纬度
+        let inferred = inferred_root_transform(&tileset);
+        let root_transform = inferred.unwrap_or(IDENTITY_TRANSFORM);
         let filter_result = if let Some(poly) = polygon {
             let region = SelectionRegion::new(poly);
-            let result = filter_tileset(&tileset, &region);
+            let result = filter_tileset_with_parent_transform(&tileset, &region, &root_transform);
             if result.download_uris.is_empty() {
                 return Err("选区内无可下载的瓦片".to_string());
             }
@@ -448,6 +452,13 @@ impl Tiles3dFetcher {
         // 8. 重写 root tileset.json 中的 URI 为本地路径
         let mut rewritten_tileset = rewrite_tileset_uris(&filter_result.tileset, &uri_to_local);
         strip_query_params_from_tileset(&mut rewritten_tileset);
+
+        // 无 transform 的 tileset 注入推断的地理定位变换，保证离线预览位置正确
+        if rewritten_tileset.root.transform.is_none() {
+            if let Some(transform) = &inferred {
+                rewritten_tileset.root.transform = Some(transform.to_vec());
+            }
+        }
 
         // 9. 写入 tileset.json
         let output_tileset_path = output_dir.join("tileset.json");

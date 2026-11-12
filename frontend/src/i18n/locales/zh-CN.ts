@@ -795,6 +795,7 @@ const zhCN = {
     sourceTitle: '3D Tiles 数据源',
     sourceDescription: 'URL 或 Cesium Ion，自动估算选区瓦片',
     referer: 'Referer（可选，针对 OSS/CDN 防盗链）',
+    previewProxyFailed: '预览代理启动失败，尝试直接加载 tileset',
     assetIdPlaceholder: '例如 96188',
     taskName: '任务名称',
     taskNamePlaceholder: '留空则自动生成，例如 3dtiles_20260506',

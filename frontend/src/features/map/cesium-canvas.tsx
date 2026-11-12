@@ -24,6 +24,44 @@ type Entity = any
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Handler = any
 
+/**
+ * 部分转换工具导出的 tileset 无 root transform，地理参考记录在
+ * properties.Longitude/Latitude（弧度）/ Height（米）中。
+ * Cesium 会把这类 tileset 放在地心，这里推断 ENU 变换：
+ * 将 root 包围体中心映射到 properties 地理范围中心。
+ */
+function applyInferredGeoreference(Cesium: Cesium, tileset: Cesium): boolean {
+  try {
+    if (tileset.root?.transform) return false
+    const bv = tileset.root?.boundingVolume
+    if (!bv || bv.region) return false
+    const props = tileset.properties ?? {}
+    const lon = props.Longitude
+    const lat = props.Latitude
+    if (
+      !lon || !lat ||
+      typeof lon.minimum !== 'number' || typeof lon.maximum !== 'number' ||
+      typeof lat.minimum !== 'number' || typeof lat.maximum !== 'number'
+    ) return false
+    const center = tileset.root?.boundingSphere?.center
+    if (!center) return false
+
+    const lonC = (lon.minimum + lon.maximum) / 2
+    const latC = (lat.minimum + lat.maximum) / 2
+    const h = typeof props.Height?.minimum === 'number' && typeof props.Height?.maximum === 'number'
+      ? (props.Height.minimum + props.Height.maximum) / 2
+      : 0
+    const enu = Cesium.Transforms.eastNorthUpToFixedFrame(
+      Cesium.Cartesian3.fromRadians(lonC, latC, h),
+    )
+    const offset = Cesium.Matrix4.fromTranslation(new Cesium.Cartesian3(-center.x, -center.y, -center.z))
+    tileset.modelMatrix = Cesium.Matrix4.multiply(enu, offset, new Cesium.Matrix4())
+    return true
+  } catch {
+    return false
+  }
+}
+
 type DrawMode = 'rect' | 'polygon' | null
 
 function lngLatBounds(points: { lng: number; lat: number }[]): MapBounds {
@@ -506,6 +544,7 @@ export function CesiumCanvas() {
             color: `color("white", ${opacity / 100})`,
           })
         }
+        applyInferredGeoreference(Cesium, tileset)
         viewer.zoomTo(tileset)
         setHasTileset(true)
         if (!opts?.silent) toast.success(t('cesium.tilesetLoaded'))

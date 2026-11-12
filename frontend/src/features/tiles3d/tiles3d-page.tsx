@@ -24,7 +24,9 @@ import {
   analyze3dTiles,
   create3dTilesTask,
   estimate3dTiles,
+  startTileProxy,
 } from './tiles3d-api'
+import { RequestHeadersEditor } from '@/features/sources/request-headers-editor'
 import type {
   Tiles3dEstimate,
   Tiles3dSource,
@@ -73,7 +75,8 @@ export function Tiles3dPage() {
 
   const [sourceMode, setSourceMode] = useState<SourceMode>('url')
   const [tilesetUrl, setTilesetUrl] = useState('')
-  const [referer, setReferer] = useState('')
+  const [customHeaders, setCustomHeaders] = useState<Record<string, string>>({})
+  const [headersError, setHeadersError] = useState<string | null>(null)
   const [assetId, setAssetId] = useState<string>('')
   const [ionToken, setIonToken] = useState('')
   const [summary, setSummary] = useState<TilesetSummary | null>(null)
@@ -111,10 +114,9 @@ export function Tiles3dPage() {
     }
     const url = tilesetUrl.trim()
     if (!url) return null
-    const headers: Record<string, string> = {}
-    if (referer.trim()) headers['Referer'] = referer.trim()
+    const headers = Object.keys(customHeaders).length > 0 ? { ...customHeaders } : undefined
     return { type: 'url', tileset_url: url, headers }
-  }, [sourceMode, tilesetUrl, referer, assetId, ionToken])
+  }, [sourceMode, tilesetUrl, customHeaders, assetId, ionToken])
 
   const persistIonToken = async () => {
     if (!settingsQuery.data) return
@@ -161,9 +163,26 @@ export function Tiles3dPage() {
             }),
           )
         } else if (source.type === 'url') {
+          let previewUrl = source.tileset_url
+          // 配置了自定义请求头时，走本地反向代理预览（浏览器无法直接携带 Referer 等头）
+          if (Object.keys(source.headers ?? {}).length > 0 && inTauri) {
+            try {
+              const parsed = new URL(source.tileset_url)
+              const dir = parsed.pathname.substring(0, parsed.pathname.lastIndexOf('/'))
+              const fileName = parsed.pathname.substring(parsed.pathname.lastIndexOf('/') + 1)
+              const proxyBase = await startTileProxy(
+                `${parsed.origin}${dir}${parsed.search}`,
+                source.headers ?? {},
+                proxy,
+              )
+              previewUrl = `${proxyBase}/${fileName}`
+            } catch (e) {
+              console.warn(t('tiles3d.previewProxyFailed'), e)
+            }
+          }
           window.dispatchEvent(
             new CustomEvent('gd:preview-tileset', {
-              detail: { type: 'url', url: source.tileset_url },
+              detail: { type: 'url', url: previewUrl },
             }),
           )
         }
@@ -302,15 +321,11 @@ export function Tiles3dPage() {
                 className="h-8 text-xs"
               />
             </div>
-            <div className="space-y-1.5">
-              <Label className="text-xs">{t('tiles3d.referer')}</Label>
-              <Input
-                value={referer}
-                onChange={(e) => setReferer(e.target.value)}
-                placeholder="https://referer-host"
-                className="h-8 text-xs"
-              />
-            </div>
+            <RequestHeadersEditor
+              value={customHeaders}
+              onChange={setCustomHeaders}
+              onError={setHeadersError}
+            />
           </TabsContent>
 
           <TabsContent value="ion" className="mt-3 space-y-2">
@@ -392,7 +407,7 @@ export function Tiles3dPage() {
             size="sm"
             variant="outline"
             onClick={() => analyzeMutation.mutate()}
-            disabled={analyzeMutation.isPending || !source}
+            disabled={analyzeMutation.isPending || !source || headersError != null}
           >
             {analyzeMutation.isPending ? (
               <Loader2 className="mr-1 size-3.5 animate-spin" />
@@ -405,7 +420,7 @@ export function Tiles3dPage() {
             type="button"
             size="sm"
             onClick={onDownloadClick}
-            disabled={downloadMutation.isPending || !summary}
+            disabled={downloadMutation.isPending || !summary || headersError != null}
           >
             {downloadMutation.isPending ? (
               <Loader2 className="mr-1 size-3.5 animate-spin" />

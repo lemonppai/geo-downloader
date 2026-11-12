@@ -3551,7 +3551,10 @@ pub async fn estimate_3dtiles(
     let tileset = fetcher.fetch_tileset(&endpoint.tileset_url).await?;
 
     let region = tiles3d::filter::SelectionRegion::new(&polygon);
-    let result = tiles3d::filter::filter_tileset(&tileset, &region);
+    let root_transform = tiles3d::filter::inferred_root_transform(&tileset)
+        .unwrap_or(tiles3d::filter::IDENTITY_TRANSFORM);
+    let result =
+        tiles3d::filter::filter_tileset_with_parent_transform(&tileset, &region, &root_transform);
 
     Ok(Tiles3dEstimate {
         total_tiles: result.original_count as u32,
@@ -3586,7 +3589,13 @@ pub async fn create_3dtiles_task(
     let tile_count;
     if let Some(ref polygon) = request.polygon {
         let region = tiles3d::filter::SelectionRegion::new(polygon);
-        let filter_result = tiles3d::filter::filter_tileset(&tileset, &region);
+        let root_transform = tiles3d::filter::inferred_root_transform(&tileset)
+            .unwrap_or(tiles3d::filter::IDENTITY_TRANSFORM);
+        let filter_result = tiles3d::filter::filter_tileset_with_parent_transform(
+            &tileset,
+            &region,
+            &root_transform,
+        );
         tile_count = filter_result.content_count as u32;
         if tile_count == 0 {
             return Err("选区内无可下载的 3D Tiles 数据".to_string());

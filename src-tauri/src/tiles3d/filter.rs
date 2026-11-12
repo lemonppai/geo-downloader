@@ -335,6 +335,86 @@ fn ecef_to_lonlat(x: f64, y: f64, z: f64) -> (f64, f64) {
 }
 
 // ============================================================
+// 地理参考推断：无 root transform 的 tileset
+// ============================================================
+
+/// 部分转换工具导出的 tileset 没有 root transform，地理参考记录在
+/// properties.Longitude/Latitude（弧度）/ Height（米）的 minimum/maximum 中。
+/// 推断规则：将 root 包围体中心映射到 properties 地理范围中心——无论工具
+/// 采用「原点锚定在角落」还是「原点锚定在中心」的约定，该映射结果一致。
+/// 返回 ENU→ECEF 仿射变换（列主序 4x4）。
+pub fn inferred_root_transform(tileset: &Tileset) -> Option<TileTransform> {
+    if tileset.root.transform.is_some() {
+        return None;
+    }
+    // region 包围体本身是全局坐标，无需推断
+    if tileset.root.bounding_volume.region.is_some() {
+        return None;
+    }
+    let props = tileset.properties.as_ref()?;
+    let (lon_min, lon_max) = numeric_range(props.get("Longitude"))?;
+    let (lat_min, lat_max) = numeric_range(props.get("Latitude"))?;
+
+    let center = tileset
+        .root
+        .bounding_volume
+        .box_volume
+        .as_ref()
+        .filter(|b| b.len() >= 3)
+        .map(|b| (b[0], b[1], b[2]))
+        .or_else(|| {
+            tileset
+                .root
+                .bounding_volume
+                .sphere
+                .as_ref()
+                .filter(|s| s.len() >= 3)
+                .map(|s| (s[0], s[1], s[2]))
+        })?;
+
+    let lon_c = (lon_min + lon_max) / 2.0;
+    let lat_c = (lat_min + lat_max) / 2.0;
+    let h_c = numeric_range(props.get("Height"))
+        .map(|(h_min, h_max)| (h_min + h_max) / 2.0)
+        .unwrap_or(0.0);
+
+    let enu = enu_to_ecef_transform(lon_c, lat_c, h_c);
+    let mut offset = IDENTITY_TRANSFORM;
+    offset[12] = -center.0;
+    offset[13] = -center.1;
+    offset[14] = -center.2;
+    Some(multiply_transforms(&enu, &offset))
+}
+
+fn numeric_range(value: Option<&serde_json::Value>) -> Option<(f64, f64)> {
+    let obj = value?.as_object()?;
+    let min = obj.get("minimum")?.as_f64()?;
+    let max = obj.get("maximum")?.as_f64()?;
+    Some((min, max))
+}
+
+/// ENU → ECEF 4x4 变换（列主序），基于 WGS-84 椭球
+fn enu_to_ecef_transform(lon_rad: f64, lat_rad: f64, height: f64) -> TileTransform {
+    const A: f64 = 6_378_137.0; // 长半轴
+    const E2: f64 = 0.006_694_379_990_14; // 第一偏心率^2
+
+    let (sin_lat, cos_lat) = (lat_rad.sin(), lat_rad.cos());
+    let (sin_lon, cos_lon) = (lon_rad.sin(), lon_rad.cos());
+    let n = A / (1.0 - E2 * sin_lat * sin_lat).sqrt();
+    let px = (n + height) * cos_lat * cos_lon;
+    let py = (n + height) * cos_lat * sin_lon;
+    let pz = (n * (1.0 - E2) + height) * sin_lat;
+
+    // 列主序：列 0 = East，列 1 = North，列 2 = Up，列 3 = 平移
+    [
+        -sin_lon, cos_lon, 0.0, 0.0,
+        -sin_lat * cos_lon, -sin_lat * sin_lon, cos_lat, 0.0,
+        cos_lat * cos_lon, cos_lat * sin_lon, sin_lat, 0.0,
+        px, py, pz, 1.0,
+    ]
+}
+
+// ============================================================
 // 树过滤：递归过滤 tileset 树
 // ============================================================
 
@@ -574,5 +654,87 @@ mod tests {
         assert_eq!(result.download_uris, vec!["tile.b3dm"]);
         assert_eq!(result.filtered_count, 2);
         assert_eq!(result.uri_transforms["tile.b3dm"][1], 1.0);
+    }
+
+    #[test]
+    fn infers_root_transform_from_properties_when_missing() {
+        // 模拟国产工具导出：无 root transform，地理参考在 properties 中
+        let tileset: Tileset = serde_json::from_value(serde_json::json!({
+            "asset": { "version": "1.0" },
+            "geometricError": 10000.0,
+            "properties": {
+                "Height": { "maximum": 120.85, "minimum": -43.64 },
+                "Latitude": { "maximum": 0.40439521197297762, "minimum": 0.40428138760301607 },
+                "Longitude": { "maximum": 1.9795844832645508, "minimum": 1.979453300906012 }
+            },
+            "root": {
+                "boundingVolume": { "box": [538.59, 538.59, 538.59, 538.59, 0.0, 0.0, 0.0, 538.59, 0.0, 0.0, 0.0, 538.59] },
+                "geometricError": 10000.0
+            }
+        })).unwrap();
+
+        let transform = inferred_root_transform(&tileset).expect("应推断出变换");
+
+        // 包围体中心映射后应落在 properties 经纬度范围的中心（WGS-84）
+        let center = transform_point(&transform, [538.59, 538.59, 538.59]);
+        let (lng, lat) = ecef_to_lonlat(center[0], center[1], center[2]);
+        let lon_center_deg = ((1.9795844832645508_f64 + 1.979453300906012) / 2.0).to_degrees();
+        let lat_center_deg = ((0.40439521197297762_f64 + 0.40428138760301607) / 2.0).to_degrees();
+        assert!((lng - lon_center_deg).abs() < 1e-6, "lng: {lng} vs {lon_center_deg}");
+        assert!((lat - lat_center_deg).abs() < 1e-6, "lat: {lat} vs {lat_center_deg}");
+
+        // 已有 transform 的 tileset 不应覆盖
+        let with_transform: Tileset = serde_json::from_value(serde_json::json!({
+            "asset": { "version": "1.0" },
+            "geometricError": 100.0,
+            "properties": { "Longitude": { "minimum": 1.0, "maximum": 2.0 }, "Latitude": { "minimum": 0.4, "maximum": 0.5 } },
+            "root": {
+                "boundingVolume": { "box": [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0] },
+                "geometricError": 10.0,
+                "transform": [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+            }
+        })).unwrap();
+        assert!(inferred_root_transform(&with_transform).is_none());
+
+        // 缺少 properties 时不推断
+        let no_props: Tileset = serde_json::from_value(serde_json::json!({
+            "asset": { "version": "1.0" },
+            "geometricError": 100.0,
+            "root": {
+                "boundingVolume": { "box": [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0] },
+                "geometricError": 10.0
+            }
+        })).unwrap();
+        assert!(inferred_root_transform(&no_props).is_none());
+    }
+
+    #[test]
+    fn inferred_transform_enables_region_filtering_for_local_tilesets() {
+        // 无 transform 的局部 tileset，推断后选区过滤应命中
+        let tileset: Tileset = serde_json::from_value(serde_json::json!({
+            "asset": { "version": "1.0" },
+            "geometricError": 10000.0,
+            "properties": {
+                "Height": { "maximum": 100.0, "minimum": 0.0 },
+                "Latitude": { "maximum": 0.40440, "minimum": 0.40428 },
+                "Longitude": { "maximum": 1.97958, "minimum": 1.97945 }
+            },
+            "root": {
+                "boundingVolume": { "box": [538.59, 538.59, 538.59, 538.59, 0.0, 0.0, 0.0, 538.59, 0.0, 0.0, 0.0, 538.59] },
+                "geometricError": 10000.0,
+                "content": { "uri": "Data/b0.b3dm" }
+            }
+        })).unwrap();
+
+        let transform = inferred_root_transform(&tileset).unwrap();
+        let region = SelectionRegion::new(&[
+            vec![113.0, 23.0],
+            vec![114.5, 23.0],
+            vec![114.5, 23.5],
+            vec![113.0, 23.5],
+        ]);
+        let result = filter_tileset_with_parent_transform(&tileset, &region, &transform);
+        assert_eq!(result.download_uris, vec!["Data/b0.b3dm"]);
+        assert_eq!(result.content_count, 1);
     }
 }

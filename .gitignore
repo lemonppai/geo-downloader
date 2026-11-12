@@ -49,3 +49,5 @@ output/
 
 # CodeGraph index (generated)
 .codegraph/
+
+.workbuddy/
