@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Eye, EyeOff, Plus, Trash2 } from 'lucide-react'
+import { Plus, Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -13,7 +13,6 @@ export function RequestHeadersEditor({ value, onChange, onError, disabled = fals
 }) {
   const [rows, setRows] = useState<HeaderRow[]>(() => Object.entries(value ?? {})
     .map(([name, value]) => ({ id: crypto.randomUUID(), name, value })))
-  const [visible, setVisible] = useState(false)
   const [error, setError] = useState<string | null>(null)
   useEffect(() => { onError(null) }, [onError])
 
@@ -55,7 +54,7 @@ export function RequestHeadersEditor({ value, onChange, onError, disabled = fals
           disabled={disabled} autoComplete="off" spellCheck={false} className="font-mono text-xs"
           onChange={(event) => update(rows.map((item) => item.id === row.id ? { ...item, name: event.target.value } : item))} />
         <Input aria-label={`请求头 ${index + 1} 值`} placeholder="Bearer … / https://…" value={row.value}
-          type={visible ? 'text' : 'password'} disabled={disabled} autoComplete="off" spellCheck={false}
+          type="text" disabled={disabled} autoComplete="off" spellCheck={false}
           className="font-mono text-xs"
           onChange={(event) => update(rows.map((item) => item.id === row.id ? { ...item, value: event.target.value } : item))} />
       </div>

@@ -522,6 +522,51 @@ export function CesiumCanvas() {
     }
   }, [])
 
+  // 收集树中所有带 content 且 boundingVolume 为 region 的 tile（弧度矩形）
+  function collectContentRectangles(tile: Cesium, acc: { rect: Cesium; ge: number }[]): void {
+    if (!tile) return
+    const rect = tile.boundingVolume?.rectangle
+    if (tile.content && rect) acc.push({ rect, ge: tile.geometricError })
+    for (const child of tile.children ?? []) collectContentRectangles(child, acc)
+  }
+
+  // 由最细层级叶子 tile 推断实际内容范围并飞向其中心。
+  // 适用 root region 为全球（或被过滤后仍粗大）而内容只占小区域的 tileset。
+  // 返回 false 表示无法推断（无 region 信息），调用方回退 zoomTo。
+  function flyToContentExtent(Cesium: Cesium, tileset: Cesium): boolean {
+    const viewer = viewerRef.current
+    if (!viewer) return false
+    const leaves: { rect: Cesium; ge: number }[] = []
+    collectContentRectangles(tileset.root, leaves)
+    if (leaves.length === 0) return false
+    // 只取 geometricError 最细的 25%，过滤掉粗层级的大 region（如全球 root.b3dm）
+    const ges = leaves.map((l) => l.ge).sort((a, b) => a - b)
+    const cutoff = ges[Math.min(ges.length - 1, Math.floor((ges.length - 1) * 0.25))]
+    const fine = leaves.filter((l) => l.ge <= cutoff)
+    let west = Infinity
+    let south = Infinity
+    let east = -Infinity
+    let north = -Infinity
+    for (const { rect } of fine) {
+      west = Math.min(west, rect.west)
+      south = Math.min(south, rect.south)
+      east = Math.max(east, rect.east)
+      north = Math.max(north, rect.north)
+    }
+    if (!Number.isFinite(west) || east - west >= Math.PI) return false
+    const toDeg = (r: number) => (r * 180) / Math.PI
+    const centerLon = toDeg((west + east) / 2)
+    const centerLat = toDeg((south + north) / 2)
+    const spanLatM = (north - south) * 6378137
+    const spanLonM = (east - west) * 6378137 * Math.cos((south + north) / 2)
+    const height = Math.max(1500, Math.max(spanLatM, spanLonM) * 2.5)
+    viewer.camera.flyTo({
+      destination: Cesium.Cartesian3.fromDegrees(centerLon, centerLat, height),
+      duration: 1.5,
+    })
+    return true
+  }
+
   // 全球范围 tileset（如 OSM Buildings）的包围球覆盖整个地球，
   // zoomTo 会把相机拉到全球尺度导致模型不可见；有选区时应飞向选区
   function flyToSelectionOrTileset(tileset: Cesium) {
@@ -530,9 +575,13 @@ export function CesiumCanvas() {
     const sel = useSelectionStore.getState()
     if (sel.bounds != null || (sel.polygon != null && sel.polygon.length > 0)) {
       drawSelection(sel.bounds, sel.polygon, true)
-    } else {
-      viewer.zoomTo(tileset)
+      return
     }
+    const Cesium = cesiumRef.current
+    // 无选区：尝试用最细层级叶子 tile 的 region 推断实际内容范围
+    // （root region 可能是全球，zoomTo 全球包围球看不见模型）
+    if (Cesium && flyToContentExtent(Cesium, tileset)) return
+    viewer.zoomTo(tileset)
   }
 
   const loadTilesetFromUrl = useCallback(

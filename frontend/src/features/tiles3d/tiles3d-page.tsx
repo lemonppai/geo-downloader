@@ -164,8 +164,11 @@ export function Tiles3dPage() {
           )
         } else if (source.type === 'url') {
           let previewUrl = source.tileset_url
-          // 配置了自定义请求头时，走本地反向代理预览（浏览器无法直接携带 Referer 等头）
-          if (Object.keys(source.headers ?? {}).length > 0 && inTauri) {
+          // 统一走本地反向代理预览：
+          // 1. 浏览器无法直接携带 Referer/Authorization 等头
+          // 2. 目标服务器（如本地静态服务）通常不带 CORS 头，webview 跨源会被拦截；
+          //    代理响应统一注入 Access-Control-Allow-Origin
+          if (inTauri) {
             try {
               const parsed = new URL(source.tileset_url)
               const dir = parsed.pathname.substring(0, parsed.pathname.lastIndexOf('/'))
