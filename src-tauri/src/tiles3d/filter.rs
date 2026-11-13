@@ -580,6 +580,81 @@ fn filter_tile(
     Some(result)
 }
 
+/// 收集实体内容（非外部 tileset 引用）节点的 (geometricError, region)
+/// region 为弧度 [west, south, east, north, minHeight, maxHeight]
+pub fn collect_content_regions(tile: &Tile, acc: &mut Vec<(f64, Vec<f64>)>) {
+    if !tile.is_external_tileset() {
+        if let Some(ref r) = tile.bounding_volume.region {
+            if r.len() >= 6 {
+                acc.push((tile.geometric_error, r.clone()));
+            }
+        }
+    }
+    if let Some(ref children) = tile.children {
+        for child in children {
+            collect_content_regions(child, acc);
+        }
+    }
+}
+
+/// 取最细 25%（geometricError 最小）内容 region 的并集，
+/// 过滤掉粗层级占位瓦片（如 OSM Buildings 的全球 root.b3dm）
+fn finest_region_union(regions: &[(f64, Vec<f64>)]) -> Option<Vec<f64>> {
+    if regions.is_empty() {
+        return None;
+    }
+    let mut ges: Vec<f64> = regions.iter().map(|(g, _)| *g).collect();
+    ges.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let cutoff = ges[((ges.len() - 1) as f64 * 0.25) as usize];
+    let mut w = f64::INFINITY;
+    let mut s = f64::INFINITY;
+    let mut e = f64::NEG_INFINITY;
+    let mut n = f64::NEG_INFINITY;
+    let mut hmin = f64::INFINITY;
+    let mut hmax = f64::NEG_INFINITY;
+    let mut count = 0usize;
+    for (ge, r) in regions {
+        if *ge <= cutoff && r.len() >= 6 {
+            w = w.min(r[0]);
+            s = s.min(r[1]);
+            e = e.max(r[2]);
+            n = n.max(r[3]);
+            hmin = hmin.min(r[4]);
+            hmax = hmax.max(r[5]);
+            count += 1;
+        }
+    }
+    if count == 0 {
+        return None;
+    }
+    Some(vec![w, s, e, n, hmin, hmax])
+}
+
+/// 将根节点与外部 tileset 引用节点的 region 收紧为实际内容并集，
+/// 使离线包的模型区域中心点即为选区中心（供其他项目 zoomTo/定位使用）。
+/// 仅在空间过滤（有选区）时调用；content_regions 来自实际保留的实体瓦片。
+pub fn tighten_bounding_regions(tileset: &mut Tileset, content_regions: &[(f64, Vec<f64>)]) {
+    let Some(union) = finest_region_union(content_regions) else {
+        return;
+    };
+    fn tighten_node(tile: &mut Tile, union: &[f64]) {
+        if tile.is_external_tileset() {
+            tile.bounding_volume.region = Some(union.to_vec());
+        }
+        if let Some(ref mut children) = tile.children {
+            for child in children {
+                tighten_node(child, union);
+            }
+        }
+    }
+    tileset.root.bounding_volume.region = Some(union.clone());
+    if let Some(ref mut children) = tileset.root.children {
+        for child in children {
+            tighten_node(child, &union);
+        }
+    }
+}
+
 fn count_tiles(tile: &Tile) -> usize {
     let mut count = 1;
     if let Some(ref children) = tile.children {
@@ -736,5 +811,77 @@ mod tests {
         let result = filter_tileset_with_parent_transform(&tileset, &region, &transform);
         assert_eq!(result.download_uris, vec!["Data/b0.b3dm"]);
         assert_eq!(result.content_count, 1);
+    }
+
+    #[test]
+    fn tighten_bounding_regions_uses_finest_content_union() {
+        // 模拟 OSM Buildings 结构：root 占位（全球 region、大 ge）+ 外部引用节点
+        let mut tileset: Tileset = serde_json::from_value(serde_json::json!({
+            "asset": { "version": "1.0" },
+            "geometricError": 154134.0,
+            "root": {
+                "boundingVolume": { "region": [-3.14159, -1.47, 3.14155, 1.45, -394.0, 5967.0] },
+                "geometricError": 77067.0,
+                "refine": "ADD",
+                "content": { "uri": "root.b3dm" },
+                "children": [
+                    {
+                        "boundingVolume": { "region": [1.57079, -1.4035, 3.13600, 1.4277, -394.0, 5967.0] },
+                        "geometricError": 77067.0,
+                        "content": { "uri": "0-1-0.json" }
+                    }
+                ]
+            }
+        })).unwrap();
+
+        // 实际内容：root.b3dm 占位（大 ge）+ 两个细粒度小 region 瓦片
+        let regions = vec![
+            (77067.0_f64, vec![-3.14159_f64, -1.47, 3.14155, 1.45, -394.0, 5967.0]),
+            (4.7, vec![1.9794, 0.4042, 1.9796, 0.4044, 0.0, 120.0]),
+            (4.7, vec![1.9793, 0.4041, 1.9795, 0.4043, -10.0, 60.0]),
+        ];
+
+        // 收集实体内容：root.b3dm 计入，外部引用 0-1-0.json 不计入
+        let mut acc = Vec::new();
+        collect_content_regions(&tileset.root, &mut acc);
+        assert_eq!(acc.len(), 1); // 仅 root.b3dm（子节点是 .json 引用）
+        assert_eq!(acc[0].0, 77067.0);
+
+        tighten_bounding_regions(&mut tileset, &regions);
+
+        // 根与外部引用节点的 region 应收紧为两个细粒度瓦片的并集
+        let root_region = tileset.root.bounding_volume.region.as_ref().unwrap();
+        assert!((root_region[0] - 1.9793).abs() < 1e-12);
+        assert!((root_region[1] - 0.4041).abs() < 1e-12);
+        assert!((root_region[2] - 1.9796).abs() < 1e-12);
+        assert!((root_region[3] - 0.4044).abs() < 1e-12);
+        assert!((root_region[4] - (-10.0)).abs() < 1e-12);
+        assert!((root_region[5] - 120.0).abs() < 1e-12);
+
+        let child = &tileset.root.children.as_ref().unwrap()[0];
+        assert_eq!(child.bounding_volume.region.as_ref().unwrap(), root_region);
+
+        // 中心点应为并集中心（即选区中心附近）
+        let center_lon = (root_region[0] + root_region[2]) / 2.0;
+        let center_lat = (root_region[1] + root_region[3]) / 2.0;
+        assert!((center_lon - (1.9793 + 1.9796) / 2.0).abs() < 1e-12);
+        assert!((center_lat - (0.4041 + 0.4044) / 2.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn tighten_bounding_regions_noop_without_regions() {
+        let mut tileset: Tileset = serde_json::from_value(serde_json::json!({
+            "asset": { "version": "1.0" },
+            "geometricError": 100.0,
+            "root": {
+                "boundingVolume": { "region": [0.0, 0.0, 1.0, 1.0, 0.0, 100.0] },
+                "geometricError": 100.0,
+                "content": { "uri": "a.b3dm" }
+            }
+        })).unwrap();
+        let original = tileset.root.bounding_volume.region.clone().unwrap();
+
+        tighten_bounding_regions(&mut tileset, &[]);
+        assert_eq!(tileset.root.bounding_volume.region.unwrap(), original);
     }
 }

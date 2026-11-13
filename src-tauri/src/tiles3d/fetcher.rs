@@ -1,7 +1,8 @@
 use crate::task::PauseControl;
 use crate::tiles3d::filter::{
-    filter_tileset_all, filter_tileset_with_parent_transform, inferred_root_transform,
-    SelectionRegion, TileTransform, IDENTITY_TRANSFORM,
+    collect_content_regions, filter_tileset_all, filter_tileset_with_parent_transform,
+    inferred_root_transform, tighten_bounding_regions, SelectionRegion, TileTransform,
+    IDENTITY_TRANSFORM,
 };
 use crate::tiles3d::tileset::{
     IonEndpointResponse, ResolvedEndpoint, Tiles3dSource, Tileset, TilesetSummary,
@@ -12,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, Semaphore};
 use tokio_util::sync::CancellationToken;
 
@@ -269,6 +270,15 @@ impl Tiles3dFetcher {
             filter_tileset_all(&tileset)
         };
 
+        // 收集实际保留实体瓦片的 region（弧度），用于下载完成后收紧根 region，
+        // 使离线包的模型区域中心点即为选区中心
+        let content_regions: Arc<Mutex<Vec<(f64, Vec<f64>)>>> = Arc::new(Mutex::new(Vec::new()));
+        if polygon.is_some() {
+            let mut acc = Vec::new();
+            crate::tiles3d::filter::collect_content_regions(&filter_result.tileset.root, &mut acc);
+            content_regions.lock().unwrap().extend(acc);
+        }
+
         // 3. 创建输出目录
         tokio::fs::create_dir_all(output_dir)
             .await
@@ -451,6 +461,7 @@ impl Tiles3dFetcher {
                 tx,
                 total_discovered.clone(),
                 selection_region.as_ref(),
+                &content_regions,
             )
             .await;
         // tx 在 resolve_and_stream 结束时 drop，下载消费者在通道关闭后退出
@@ -466,7 +477,17 @@ impl Tiles3dFetcher {
             return Err("下载已取消".to_string());
         }
 
-        // root tileset.json 已在步骤 5b（下载开始前）写盘
+        // 8. 有选区时，用实际内容 region 并集收紧根与外部引用节点的包围体，
+        //    使离线包的模型区域中心点即为选区中心，其他项目 zoomTo 直接定位正确
+        if polygon.is_some() {
+            let regions = content_regions.lock().unwrap().clone();
+            if !regions.is_empty() {
+                tighten_bounding_regions(&mut rewritten_tileset, &regions);
+                if let Ok(json) = serde_json::to_string_pretty(&rewritten_tileset) {
+                    let _ = tokio::fs::write(&output_tileset_path, json.as_bytes()).await;
+                }
+            }
+        }
 
         let final_completed = completed.load(Ordering::Relaxed);
         let final_failed = failed.load(Ordering::Relaxed);
@@ -507,6 +528,7 @@ impl Tiles3dFetcher {
         tx: mpsc::Sender<(String, String)>,
         total_discovered: Arc<AtomicU32>,
         region: Option<&SelectionRegion>,
+        content_regions: &Arc<Mutex<Vec<(f64, Vec<f64>)>>>,
     ) -> Result<(), String> {
         use futures::stream::FuturesUnordered;
         use std::pin::Pin;
@@ -629,8 +651,14 @@ impl Tiles3dFetcher {
                                 (uri.clone(), relative)
                             })
                             .collect();
+                        // 收集子 tileset 实体内容 region（供收紧根 tileset 包围体）
+                        let mut sub_acc = Vec::new();
+                        collect_content_regions(&filter_result.tileset.root, &mut sub_acc);
+                        content_regions.lock().unwrap().extend(sub_acc);
                         let mut filtered = rewrite_tileset_uris(&filter_result.tileset, &sub_uri_map);
                         strip_query_params_from_tileset(&mut filtered);
+                        // 收紧子 tileset 自身的根/外部引用节点 region 为其内容并集
+                        tighten_bounding_regions(&mut filtered, &content_regions.lock().unwrap());
                         if let Ok(json) = serde_json::to_string_pretty(&filtered) {
                             let _ = tokio::fs::write(&dest, json.as_bytes()).await;
                         } else {
